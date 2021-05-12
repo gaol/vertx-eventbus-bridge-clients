@@ -262,10 +262,11 @@ class EventBus:
         if address in self.handlers:
             the_handler = self.handlers[address]
             if handler is None:
+                the_handler.clear()
                 del self.handlers[address]
             else:
                 the_handler.del_handler(handler)
-            if the_handler.is_at_server and (address not in self.handlers or self.handlers[address].is_empty()):
+            if the_handler.is_at_server() and the_handler.is_empty():
                 try:
                     message = _create_message('unregister', address)
                     self._send_frame(message)
@@ -302,6 +303,9 @@ class _MessageHandlers:
     
     def is_at_server(self):
         return self.at_server
+    
+    def clear(self):
+        self._handlers = []
     
     def is_empty(self):
         return len(self._handlers) == 0

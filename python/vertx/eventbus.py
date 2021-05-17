@@ -120,6 +120,7 @@ class EventBus:
                 self._state = _State.CONNECTED
                 # receiving thread
                 t1 = Thread(target=self._receive)
+                t1.setDaemon(True)
                 t1.start()
         except IOError as e:
             _print_err(1, 'SERVER', str(e))

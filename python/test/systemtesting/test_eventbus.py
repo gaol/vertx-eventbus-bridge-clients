@@ -81,6 +81,26 @@ class EventBusClientTests(unittest.TestCase):
         ebus.publish("publish-back", headers={'name': 'vertx-python'}, body={'hello': 'world'})
         latch.awaits(5)
 
+    def test_send_auto_connect(self):
+        latch = CountDownLatch()
+        ebus = EventBus(options={'auto_connect': True})
+
+        def handler(message):
+            self.assertEqual(message['body']['hello'], 'world')
+            ebus.close()
+            latch.count_down()
+        ebus.register_handler("echo-back", handler)
+        ebus.send("echo", reply_address="echo-back", body={'hello': 'world'})
+        latch.awaits(5)
+
+    def test_send_no_connect(self):
+        ebus = EventBus(options={'auto_connect': False})
+        try:
+            ebus.register_handler("echo-back", lambda x: print(x))
+            self.fail("should not here")
+        except:
+            self.assertRaises(Exception, "Socket Closed.")
+
 
 if __name__ == "__main__":
     unittest.main()

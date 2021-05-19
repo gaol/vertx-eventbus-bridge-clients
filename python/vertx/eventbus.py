@@ -90,6 +90,7 @@ class EventBus:
         self._connect = False  # default to lazy connect
         self.debug = False
         self._err_handler = err_handler
+        self.auto_connect = True
         if self._err_handler is None:
             self._err_handler = EventBus._default_err_handler
         if options is not None:
@@ -103,6 +104,8 @@ class EventBus:
                 self._connect = bool(options["connect"])
             if "debug" in options:
                 self._connect = bool(options["debug"])
+            if "auto_connect" in options:
+                self.auto_connect = bool(options["auto_connect"])
         if self._connect:
             self.connect()
     
@@ -203,7 +206,14 @@ class EventBus:
                 self._state = _State.CLOSED
             except Exception as e:
                 _print_err('Failed to close the socket', 'SEVERE', str(e))
-    
+
+    def _check_closed(self):
+        if not self.is_connected():
+            if self.auto_connect:
+                self.connect()
+            else:
+                raise Exception("Socket Closed.")
+
     # send, receive, register, unregister ------------------------------------
 
     def _send_frame(self, message_s):
@@ -212,6 +222,7 @@ class EventBus:
         self.sock.sendall(frame)
 
     def send(self, address, headers=None, body=None, reply_address=None, reply_handler=None):
+        self._check_closed()
         ra = reply_address
         rh = reply_handler
         if rh is not None:
@@ -222,6 +233,7 @@ class EventBus:
         self._send_frame(message)
     
     def publish(self, address, headers=None, body=None):
+        self._check_closed()
         message = _create_message('publish', address, headers, body)
         self._send_frame(message)
     
@@ -244,10 +256,12 @@ class EventBus:
         if callable(handler):
             if not self._address_registered_at_server(address):
                 try:
+                    self._check_closed()
                     message = _create_message('register', address)
                     self._send_frame(message)
                 except Exception as e:
                     _print_err(4, 'SEVERE', 'Registration failed\n' + str(e))
+                    raise e
             self._register_local(address, handler, True)
         else:
             _print_err(4, 'SEVERE', 'Registration failed. Function is not callable\n')
@@ -269,10 +283,12 @@ class EventBus:
                 the_handler.del_handler(handler)
             if the_handler.is_at_server() and the_handler.is_empty():
                 try:
+                    self._check_closed()
                     message = _create_message('unregister', address)
                     self._send_frame(message)
                 except Exception as e:
                     _print_err(4, 'SEVERE', 'Unregistration failed\n' + str(e))
+                    raise e
 
 
 class _MessageHandlers:

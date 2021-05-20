@@ -1,3 +1,3 @@
-from .eventbus import EventBus
+from .eventbus import EventBus, create_message, create_err_message
 
-__all__ = ["EventBus"]
+__all__ = ["EventBus", "create_message", "create_err_message"]

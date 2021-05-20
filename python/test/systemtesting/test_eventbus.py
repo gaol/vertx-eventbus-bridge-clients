@@ -28,7 +28,6 @@ class EventBusClientTests(unittest.TestCase):
         ebus = EventBus(options={'connect': True})
     
         def list_handlers(message):
-            print(message)
             handler_list = message['body']['list']
             addresses = [e['address'] for e in handler_list]
             if "first" in message['headers'] and message['headers']['first']:
@@ -100,6 +99,33 @@ class EventBusClientTests(unittest.TestCase):
             self.fail("should not here")
         except:
             self.assertRaises(Exception, "Socket Closed.")
+
+    def test_err_handler_bad_address(self):
+        latch = CountDownLatch()
+
+        def err_handler(message):
+            self.assertEqual(message['type'], 'err')
+            self.assertEqual(message['message'], 'access_denied')
+            ebus.close()
+            latch.count_down()
+        ebus = EventBus(err_handler=err_handler)
+        ebus.send('#-Bad_Address$', body={'name': 'python'})
+        latch.awaits(5)
+
+    def test_re_connect_with_registered_handlers(self):
+        latch = CountDownLatch()
+
+        def local_handler(message):
+            self.assertEqual(message['type'], 'message')
+            self.assertEqual(message['body']['name'], 'python')
+            ebus.close()
+            latch.count_down()
+        ebus = EventBus()
+        # register local before getting connect
+        ebus._register_local("local-handler", local_handler)
+        ebus.connect()
+        ebus.send('local-handler', body={'name': 'python'})
+        latch.awaits(5)
 
 
 if __name__ == "__main__":

@@ -5,6 +5,7 @@
 # 2021: Lin Gao https://github.com/gaol
 
 from enum import IntEnum
+import errno
 import json
 import socket
 import struct
@@ -25,7 +26,7 @@ def _print_err(no, category, error):
     print(error)
 
 
-def _create_message(msg_type='ping', address=None, headers=None, body=None, reply_address=None):
+def create_message(msg_type='ping', address=None, headers=None, body=None, reply_address=None):
     msg = {'type': msg_type}
     if 'ping' != msg_type and address is None:
         raise Exception("address of the message must be provided")
@@ -39,7 +40,7 @@ def _create_message(msg_type='ping', address=None, headers=None, body=None, repl
     return json.dumps(msg)
 
 
-def _create_err_message(address, failure_code, message):
+def create_err_message(address, failure_code, message):
     """
     message type of the error message from client to bridge is always `send`
     """
@@ -57,6 +58,7 @@ class _State(IntEnum):
     CONNECTED = 2  # when the client gets connected to the bridge
     CLOSING = 3  # when the client is closing the connection
     CLOSED = 4  # when the client closed the connection
+    BROKEN = 5  # when the client connection is broken
 
 
 class EventBus:
@@ -87,60 +89,86 @@ class EventBus:
         self.timeout = 60  # socket timeout, in seconds
         self.ping_interval = 5  # heart beat for ping/pong
         self.wait_timeout = 30  # timeout waiting for the target state
-        self._connect = False  # default to lazy connect
         self.debug = False
         self._err_handler = err_handler
         self.auto_connect = True
+        self.max_reconnect = 5
         if self._err_handler is None:
             self._err_handler = EventBus._default_err_handler
         if options is not None:
             if "timeout" in options:
-                self.timeout = float(options["timeout"])
+                self.timeout = int(options["timeout"])
             if "ping_interval" in options:
                 self.ping_interval = int(options["ping_interval"])
             if "wait_timeout" in options:
                 self.wait_timeout = int(options["wait_timeout"])
-            if "connect" in options:
-                self._connect = bool(options["connect"])
             if "debug" in options:
-                self._connect = bool(options["debug"])
+                self.debug = bool(options["debug"])
             if "auto_connect" in options:
                 self.auto_connect = bool(options["auto_connect"])
-        if self._connect:
-            self.connect()
+            if "max_reconnect" in options:
+                self.max_reconnect = int(options["max_reconnect"])
+            if "connect" in options and bool(options["connect"]):
+                self.connect()
     
     @staticmethod
     def _default_err_handler(message):
         _print_err('message failure', 'SEVERE', message)
     
     def connect(self):
-        try:
-            if self._state != _State.CONNECTED:
-                self._state = _State.CONNECTING
-                self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                self.sock.settimeout(self.timeout)
-                self.sock.connect((self.host, self.port))
-                self._state = _State.CONNECTED
-                # receiving thread
-                t1 = Thread(target=self._receive)
-                t1.setDaemon(True)
-                t1.start()
-        except IOError as e:
-            _print_err(1, 'SERVER', str(e))
-            raise e
-        except Exception as e:
-            _print_err('Undefined Error', 'SEVERE', str(e))
-            raise e
-    
+        if self._state == _State.CLOSED:
+            print("Client has been closed")
+            return None
+        num_of_tries = self.max_reconnect if self.auto_connect else 1
+        for i in range(num_of_tries):
+            try:
+                if self._state != _State.CONNECTED:
+                    self._state = _State.CONNECTING
+                    self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    self.sock.settimeout(self.timeout)
+                    self.sock.connect((self.host, self.port))
+                    self._state = _State.CONNECTED
+                    # receiving thread
+                    t1 = Thread(target=self._receive)
+                    t1.setDaemon(True)
+                    t1.start()
+                    for addr, handler in self.handlers.items():
+                        if handler.is_at_server():
+                            message = create_message('register', addr)
+                            self._send_frame(message)
+                    break
+            except IOError:
+                print("Tried to connect %d times, try again." % (i + 1))
+        else:
+            self._state = _State.CLOSED
+            raise Exception("Failed to connect after %d times try" % num_of_tries)
+
+    def _receive_chunked(self, total_read=4096, step=2048):
+        bytes_recd = 0
+        chunks = []
+        while bytes_recd < total_read:
+            chunk = self.sock.recv(min(total_read - bytes_recd, step))
+            if chunk == b'':
+                return chunk
+            chunks.append(chunk)
+            bytes_recd = bytes_recd + len(chunk)
+        return b''.join(chunks)
+
     def _receive(self):
         """
         This method gets running in receiving thread
         """
-        while self._state != _State.CLOSED:
+        while True:
             try:
-                len_str = self.sock.recv(4)
+                len_str = self._receive_chunked(4, 4)
+                if len_str == b'':
+                    self._state = _State.BROKEN
+                    break
                 len1 = struct.unpack("!i", len_str)[0]
-                payload = self.sock.recv(len1)
+                payload = self._receive_chunked(len1)
+                if payload == b'':
+                    self._state = _State.BROKEN
+                    break
                 json_message = payload.decode('utf-8')
                 message = json.loads(json_message)
                 if message['type'] == 'message':  # message
@@ -165,36 +193,20 @@ class EventBus:
                 continue
             except Exception as e:
                 if self._state == _State.CLOSED:
-                    print("socket closed")
+                    if self.debug:
+                        print("client has been closed")
                 else:
-                    # 1) close socket while thread is running
-                    # 2) function error in the client code
-                    _print_err('Undefined Error', 'SEVERE', str(e))
+                    if e.args[0] == errno.ECONNRESET:
+                        self._state = _State.CLOSED
+                        if self.debug:
+                            print("connection reset by server")
+                    else:
+                        self._state = _State.BROKEN
+                        _print_err('Undefined Error', 'SEVERE', str(e))
                 break
-    
-    def _wait(self, state=_State.CONNECTED, time_out=5.0, time_step=0.01):
-        """
-        wait for the eventbus to reach the given state
+        if self.auto_connect and self._state != _State.CLOSED:
+            self.connect()
 
-        Args:
-            state(_State): the state to wait for - default: State.CONNECTED
-            time_out(float): the timeOut in secs after which the wait fails with an Exception
-            time_step(float): the timeStep in secs in which the state should be regularly checked
-
-        :raise:
-           :Exception: wait timed out
-        """
-        time_left = time_out
-        while self._state != state and time_left > 0:
-            time.sleep(time_step)
-            time_left = time_left - time_step
-        if time_left <= 0:
-            raise Exception("wait for %s timedOut after %.3f secs" % (state.name, time_out))
-        if self.debug:
-            print("wait for %s successful after %.3f secs" % (state.name, time_out - time_left))
-    
-    # Connection send and receive---------------------------------------------
-    
     def is_connected(self):
         return self._state == _State.CONNECTED
 
@@ -204,15 +216,16 @@ class EventBus:
                 self._state = _State.CLOSING
                 self.sock.close()
                 self._state = _State.CLOSED
+                self.handlers.clear()
             except Exception as e:
                 _print_err('Failed to close the socket', 'SEVERE', str(e))
 
     def _check_closed(self):
         if not self.is_connected():
-            if self.auto_connect:
+            if self.auto_connect and self._state != _State.CLOSED:
                 self.connect()
             else:
-                raise Exception("Socket Closed.")
+                raise Exception("socket has been closed.")
 
     # send, receive, register, unregister ------------------------------------
 
@@ -229,12 +242,12 @@ class EventBus:
             if ra is None:
                 ra = str(uuid.uuid1())
             self._register_local(ra, rh, False)  # TODO this temp handle should be removed after gets resp
-        message = _create_message('send', address, headers, body, ra)
+        message = create_message('send', address, headers, body, ra)
         self._send_frame(message)
     
     def publish(self, address, headers=None, body=None):
         self._check_closed()
-        message = _create_message('publish', address, headers, body)
+        message = create_message('publish', address, headers, body)
         self._send_frame(message)
     
     def _register_local(self, address, handler, at_server=True):
@@ -257,7 +270,7 @@ class EventBus:
             if not self._address_registered_at_server(address):
                 try:
                     self._check_closed()
-                    message = _create_message('register', address)
+                    message = create_message('register', address)
                     self._send_frame(message)
                 except Exception as e:
                     _print_err(4, 'SEVERE', 'Registration failed\n' + str(e))
@@ -284,7 +297,7 @@ class EventBus:
             if the_handler.is_at_server() and the_handler.is_empty():
                 try:
                     self._check_closed()
-                    message = _create_message('unregister', address)
+                    message = create_message('unregister', address)
                     self._send_frame(message)
                 except Exception as e:
                     _print_err(4, 'SEVERE', 'Unregistration failed\n' + str(e))

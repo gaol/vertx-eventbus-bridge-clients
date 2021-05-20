@@ -6,6 +6,7 @@
 
 from enum import IntEnum
 import errno
+import logging
 import json
 import socket
 import struct
@@ -13,17 +14,7 @@ from threading import Thread
 import time
 import uuid
 
-
-# Errors -----------------------------------------------------------------
-# 1 - connection errors
-# 2 - unknown type of the received message
-# 3 - invalid state errors
-# 4 - registration failed error
-# 5 - unknown address of un-registration
-def _print_err(no, category, error):
-    print(no)
-    print(category)
-    print(error)
+LOGGER = logging.getLogger(__name__)
 
 
 def create_message(msg_type='ping', address=None, headers=None, body=None, reply_address=None):
@@ -90,8 +81,6 @@ class EventBus:
         self.options = options
         self.timeout = 60  # socket timeout, in seconds
         self.ping_interval = 5  # heart beat for ping/pong
-        self.wait_timeout = 30  # timeout waiting for the target state
-        self.debug = False
         self._err_handler = err_handler
         self.auto_connect = True
         self.max_reconnect = 5
@@ -102,10 +91,6 @@ class EventBus:
                 self.timeout = int(options["timeout"])
             if "ping_interval" in options:
                 self.ping_interval = int(options["ping_interval"])
-            if "wait_timeout" in options:
-                self.wait_timeout = int(options["wait_timeout"])
-            if "debug" in options:
-                self.debug = bool(options["debug"])
             if "auto_connect" in options:
                 self.auto_connect = bool(options["auto_connect"])
             if "max_reconnect" in options:
@@ -115,11 +100,11 @@ class EventBus:
     
     @staticmethod
     def _default_err_handler(message):
-        _print_err('message failure', 'SEVERE', message)
+        LOGGER.error(f'Got Error Message: {message} from server')
     
     def connect(self):
         if self._state == _State.CLOSED:
-            print("Client has been closed")
+            LOGGER.debug("Client has been closed")
             return None
         num_of_tries = self.max_reconnect if self.auto_connect else 1
         for i in range(num_of_tries):
@@ -142,8 +127,8 @@ class EventBus:
                             message = create_message('register', address)
                             self._send_frame(message)
                     break
-            except IOError:
-                print("Tried to connect %d times, try again." % (i + 1))
+            except IOError as e:
+                LOGGER.warning(f'Tried to connect {(i + 1)} times, try again.', exc_info=e)
         else:
             self._state = _State.CLOSED
             raise Exception("Failed to connect after %d times try" % num_of_tries)
@@ -151,17 +136,16 @@ class EventBus:
     def _ping(self):
         while self.is_connected():
             try:
-                if self.debug:
-                    print("sending ping")
+                LOGGER.debug("send ping")
                 # check last pong
                 if self.last_pong is not None:
                     if time.time() - self.last_pong > self.ping_interval * 2:
-                        print("WARNING: ping/pong packet is slow")
+                        LOGGER.warning("ping/pong packet is slow")
                 ping_message = create_message()
                 self._send_frame(ping_message)
                 time.sleep(self.ping_interval)
             except Exception as e:
-                print(e)
+                LOGGER.debug("Error on ping, ignore it", exc_info=e)
 
     def _receive_chunked(self, total_read=4096, step=2048):
         bytes_recd = 0
@@ -199,33 +183,28 @@ class EventBus:
                             for handler in self.handlers[message['address']].all_handlers():
                                 handler(message)
                         else:
-                            print("No handler found on address %s" % message['address'])
+                            LOGGER.warning("No handler found on address %s" % message['address'])
                 elif message['type'] == 'err':  # err
                     self._err_handler(message)
                 elif message['type'] == 'pong':  # ping/pong
                     self.last_pong = time.time()
-                    if self.debug:
-                        print("get pong response")
+                    LOGGER.debug("get pong response")
                 else:  # unknown message type
                     self._err_handler(message)
             except socket.timeout:
-                if self.debug:
-                    print("timeout, try again")
+                LOGGER.debug("timeout, try again")
                 continue
             except Exception as e:
                 if self._state == _State.CLOSED:
-                    if self.debug:
-                        print("client has been closed")
+                    LOGGER.debug("client has been closed")
                 else:
                     if e.args[0] == errno.ECONNRESET:
                         self._state = _State.CLOSED
                         self.handlers.clear()
-                        if self.debug:
-                            print("connection reset by server")
+                        LOGGER.debug("connection reset by server")
                     else:
                         self._state = _State.BROKEN
-                        print("Connection was broken")
-                        print(e)
+                        LOGGER.error("Connection was broken", exc_info=e)
                 break
         if self.auto_connect and self._state != _State.CLOSED:
             self.connect()
@@ -241,7 +220,7 @@ class EventBus:
                 self._state = _State.CLOSED
                 self.handlers.clear()
             except Exception as e:
-                _print_err('Failed to close the socket', 'SEVERE', str(e))
+                LOGGER.error("Failed to close the socket", exc_info=e)
 
     def _check_closed(self):
         if not self.is_connected():
@@ -296,11 +275,11 @@ class EventBus:
                     message = create_message('register', address)
                     self._send_frame(message)
                 except Exception as e:
-                    _print_err(4, 'SEVERE', 'Registration failed\n' + str(e))
+                    LOGGER.error("Registration failed", exc_info=e)
                     raise e
             self._register_local(address, handler, True)
         else:
-            _print_err(4, 'SEVERE', 'Registration failed. Function is not callable\n')
+            raise Exception("Registration failed. Function is not callable")
     
     def unregister_handler(self, address, handler=None):
         """
@@ -323,7 +302,7 @@ class EventBus:
                     message = create_message('unregister', address)
                     self._send_frame(message)
                 except Exception as e:
-                    _print_err(4, 'SEVERE', 'Unregistration failed\n' + str(e))
+                    LOGGER.error("Unregistering failed", exc_info=e)
                     raise e
 
 

@@ -97,8 +97,8 @@ class EventBusClientTests(unittest.TestCase):
         try:
             ebus.register_handler("echo-back", lambda x: print(x))
             self.fail("should not here")
-        except:
-            self.assertRaises(Exception, "Socket Closed.")
+        except Exception as e:
+            self.assertEqual(str(e.args[0]), "socket has been closed.")
 
     def test_err_handler_bad_address(self):
         latch = CountDownLatch()

@@ -30,7 +30,8 @@ def create_message(msg_type='ping', address=None, headers=None, body=None, reply
     msg = {'type': msg_type}
     if 'ping' != msg_type and address is None:
         raise Exception("address of the message must be provided")
-    msg['address'] = address
+    if address is not None:
+        msg['address'] = address
     if reply_address is not None:
         msg['replyAddress'] = reply_address
     if headers is not None:
@@ -73,7 +74,7 @@ class EventBus:
         Args:
             host(str): the host to connect to - default: 'localhost'
             port(int): the port to use - default: 7000
-            options(dict): e.g. { ping_interval=5000, timeout=60, debug=False, connect=False}
+            options(dict): e.g. { ping_interval=5, timeout=60, debug=False, connect=False}
 
         :raise:
            :IOError: - the socket could not be opened
@@ -81,6 +82,7 @@ class EventBus:
 
         """
         self.sock = None
+        self.last_pong = None
         self._state = _State.NEW
         self.host = host
         self.port = port
@@ -132,9 +134,12 @@ class EventBus:
                     t1 = Thread(target=self._receive)
                     t1.setDaemon(True)
                     t1.start()
-                    for addr, handler in self.handlers.items():
+                    tp = Thread(target=self._ping)
+                    tp.setDaemon(True)
+                    tp.start()
+                    for address, handler in self.handlers.items():
                         if handler.is_at_server():
-                            message = create_message('register', addr)
+                            message = create_message('register', address)
                             self._send_frame(message)
                     break
             except IOError:
@@ -142,6 +147,21 @@ class EventBus:
         else:
             self._state = _State.CLOSED
             raise Exception("Failed to connect after %d times try" % num_of_tries)
+
+    def _ping(self):
+        while self.is_connected():
+            try:
+                if self.debug:
+                    print("sending ping")
+                # check last pong
+                if self.last_pong is not None:
+                    if time.time() - self.last_pong > self.ping_interval * 2:
+                        print("WARNING: ping/pong packet is slow")
+                ping_message = create_message()
+                self._send_frame(ping_message)
+                time.sleep(self.ping_interval)
+            except Exception as e:
+                print(e)
 
     def _receive_chunked(self, total_read=4096, step=2048):
         bytes_recd = 0
@@ -158,16 +178,16 @@ class EventBus:
         """
         This method gets running in receiving thread
         """
-        while True:
+        while self.is_connected():
             try:
                 len_str = self._receive_chunked(4, 4)
                 if len_str == b'':
-                    self._state = _State.BROKEN
+                    self._state = _State.CLOSED
                     break
                 len1 = struct.unpack("!i", len_str)[0]
                 payload = self._receive_chunked(len1)
                 if payload == b'':
-                    self._state = _State.BROKEN
+                    self._state = _State.CLOSED
                     break
                 json_message = payload.decode('utf-8')
                 message = json.loads(json_message)
@@ -183,8 +203,9 @@ class EventBus:
                 elif message['type'] == 'err':  # err
                     self._err_handler(message)
                 elif message['type'] == 'pong':  # ping/pong
+                    self.last_pong = time.time()
                     if self.debug:
-                        print("pong")
+                        print("get pong response")
                 else:  # unknown message type
                     self._err_handler(message)
             except socket.timeout:
@@ -198,11 +219,13 @@ class EventBus:
                 else:
                     if e.args[0] == errno.ECONNRESET:
                         self._state = _State.CLOSED
+                        self.handlers.clear()
                         if self.debug:
                             print("connection reset by server")
                     else:
                         self._state = _State.BROKEN
-                        _print_err('Undefined Error', 'SEVERE', str(e))
+                        print("Connection was broken")
+                        print(e)
                 break
         if self.auto_connect and self._state != _State.CLOSED:
             self.connect()

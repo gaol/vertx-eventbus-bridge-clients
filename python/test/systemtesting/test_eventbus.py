@@ -65,6 +65,18 @@ class EventBusClientTests(unittest.TestCase):
         ebus.send("echo", reply_address="echo-back", body={'hello': 'world'})
         latch.awaits(5)
 
+    def test_send_with_handler(self):
+        latch = CountDownLatch()
+        ebus = EventBus()
+        ebus.connect()
+
+        def handler(message):
+            self.assertEqual(message['body']['hello'], 'world')
+            latch.count_down()
+        ebus.send("echo", body={'hello': 'world'}, reply_handler=handler)
+        latch.awaits(5)
+        ebus.close()
+
     def test_publish(self):
         latch = CountDownLatch()
         ebus = EventBus()
